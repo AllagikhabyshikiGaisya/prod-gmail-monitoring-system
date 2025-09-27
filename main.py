@@ -305,6 +305,7 @@ class EmailDataExtractor:
         """Extract postal code"""
         patterns = [
             r'郵便番号[\s:：]*([〒]?\d{3}-?\d{4})',
+            r'【郵便番号】[\s　]*([〒]?\d{3}-?\d{4})',
             r'〒(\d{3}-?\d{4})',
         ]
         
@@ -312,6 +313,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 postal = match.group(1).replace('〒', '')
+                postal = re.sub(r'[】【\[\]()（）]', '', postal)  # Remove brackets
+                postal = postal.strip()
                 if '-' not in postal and len(postal) == 7:
                     postal = postal[:3] + '-' + postal[3:]
                 return postal
