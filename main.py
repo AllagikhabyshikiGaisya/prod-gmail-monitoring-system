@@ -269,17 +269,20 @@ class EmailDataExtractor:
         """Extract customer name"""
         # Japanese name patterns
         patterns = [
-            r'お名前[\s:：]*([^\n\r]+)',
-            r'氏名[\s:：]*([^\n\r]+)',
-            r'名前[\s:：]*([^\n\r]+)',
+            r'▼お名前▼\s*([^\n\r▼]+)',
+            r'お名前[\s:：]*([^\n\r▼]+)',
+            r'氏名[\s:：]*([^\n\r▼]+)',
+            r'名前[\s:：]*([^\n\r▼]+)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
                 name = match.group(1).strip()
-                # Clean up common suffixes and prefixes
+                # Clean up unwanted characters and symbols
+                name = re.sub(r'[】【\[\]()（）▼]', '', name)  # Remove brackets and arrows
                 name = re.sub(r'[\s]+', ' ', name)  # Normalize whitespace
+                name = name.strip()
                 return name
         
         return ""
@@ -287,9 +290,10 @@ class EmailDataExtractor:
     def _extract_email_address_from_content(self, content: str) -> str:
         """Extract email address from email content (メールアドレス field)"""
         patterns = [
-            r'メールアドレス[\s:：]*([^\n\r\s]+@[^\n\r\s]+)',
-            r'E-mail[\s:：]*([^\n\r\s]+@[^\n\r\s]+)',
-            r'Email[\s:：]*([^\n\r\s]+@[^\n\r\s]+)',
+            r'▼メールアドレス▼\s*([^\n\r\s▼]+@[^\n\r\s▼]+)',
+            r'メールアドレス[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
+            r'E-mail[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
+            r'Email[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
             # General email pattern as fallback
             r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
         ]
@@ -297,13 +301,17 @@ class EmailDataExtractor:
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                return match.group(1).strip()
+                email = match.group(1).strip()
+                # Clean up any remaining unwanted characters
+                email = re.sub(r'[▼\s]', '', email)
+                return email
         
         return ""
     
     def _extract_postal_code(self, content: str) -> str:
         """Extract postal code"""
         patterns = [
+            r'▼郵便番号▼\s*([〒]?\d{3}-?\d{4})',
             r'郵便番号[\s:：]*([〒]?\d{3}-?\d{4})',
             r'【郵便番号】[\s　]*([〒]?\d{3}-?\d{4})',
             r'〒(\d{3}-?\d{4})',
@@ -313,7 +321,7 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 postal = match.group(1).replace('〒', '')
-                postal = re.sub(r'[】【\[\]()（）]', '', postal)  # Remove brackets
+                postal = re.sub(r'[】【\[\]()（）▼\s]', '', postal)  # Remove brackets and arrows
                 postal = postal.strip()
                 if '-' not in postal and len(postal) == 7:
                     postal = postal[:3] + '-' + postal[3:]
@@ -324,16 +332,17 @@ class EmailDataExtractor:
     def _extract_address(self, content: str) -> str:
         """Extract address"""
         patterns = [
-            r'ご住所[\s:：]*([^\n\r]+)',
-            r'住所[\s:：]*([^\n\r]+)',
+            r'▼ご住所▼\s*([^\n\r▼]+)',
+            r'ご住所[\s:：]*([^\n\r▼]+)',
+            r'住所[\s:：]*([^\n\r▼]+)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
                 address = match.group(1).strip()
-            # Clean up unwanted characters and symbols
-                address = re.sub(r'[】【\[\]()（）]', '', address)  # Remove brackets
+                # Clean up unwanted characters and symbols
+                address = re.sub(r'[】【\[\]()（）▼]', '', address)  # Remove brackets and arrows
                 address = re.sub(r'[\s]+', ' ', address)  # Normalize whitespace
                 address = address.strip()
                 return address
@@ -343,6 +352,7 @@ class EmailDataExtractor:
     def _extract_phone_number(self, content: str) -> str:
         """Extract phone number"""
         patterns = [
+            r'▼電話番号▼\s*([0-9\-]+)',
             r'電話番号[\s:：]*([0-9\-]+)',
             r'【電話番号】[\s:：]*([0-9\-]+)',
             r'TEL[\s:：]*([0-9\-]+)',
@@ -353,9 +363,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 phone = match.group(1).strip()
-                phone = re.sub(r'[】【\[\]()（）]', '', phone)  # Remove brackets
-                phone = re.sub(r'[\s]+', ' ', phone)  # Normalize whitespace
-                phone = phone.strip()
+                # Clean up unwanted characters and symbols - keep only numbers and hyphens
+                phone = re.sub(r'[】【\[\]()（）▼\s]', '', phone)  # Remove brackets and arrows but not hyphens
                 return phone
         
         return ""
@@ -363,64 +372,84 @@ class EmailDataExtractor:
     def _extract_trigger(self, content: str) -> str:
         """Extract what triggered the inquiry"""
         patterns = [
-            r'予約のきっかけ[\s:：]*([^\n\r]+)',
-            r'きっかけ[\s:：]*([^\n\r]+)',
-            r'経由[\s:：]*([^\n\r]+)',
+            r'▼会員登録のきっかけ▼\s*([^\n\r▼]+)',
+            r'▼予約のきっかけ▼\s*([^\n\r▼]+)',
+            r'予約のきっかけ[\s:：]*([^\n\r▼]+)',
+            r'きっかけ[\s:：]*([^\n\r▼]+)',
+            r'経由[\s:：]*([^\n\r▼]+)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                return match.group(1).strip()
+                trigger = match.group(1).strip()
+                # Clean up unwanted characters and symbols
+                trigger = re.sub(r'[】【\[\]()（）▼]', '', trigger)  # Remove brackets and arrows
+                trigger = re.sub(r'[\s]+', ' ', trigger)  # Normalize whitespace
+                trigger = trigger.strip()
+                return trigger
         
         # Check for common triggers in content
-        triggers = ['ウェブサイト', 'インスタグラム', 'Facebook', 'Google', 'チラシ', '紹介']
-        for trigger in triggers:
-            if trigger in content:
-                return trigger
+        trigger_map = {
+            'HP検索': 'ウェブサイト',
+            'インスタグラム': 'インスタグラム',
+            'Facebook': 'Facebook',
+            'Google': 'ウェブサイト',
+            'チラシ': 'チラシ',
+            '紹介': '紹介',
+            'ホームページ': 'ウェブサイト',
+            'ネット': 'ウェブサイト',
+            'みのおキューズモール広告': 'みのおキューズモール広告'
+        }
+        
+        for key, value in trigger_map.items():
+            if key in content:
+                return value
         
         return "ウェブサイト"  # Default
     
-    # Replace the _extract_title method (around line 423) with this updated version:
-
     def _extract_title(self, content: str, subject: str) -> str:
         """Extract or generate title based on email content and sender"""
-    
+        
         # Clean up content for better matching
         content_lower = content.lower()
         subject_lower = subject.lower()
-    
+
+        # Check for member registration (会員登録)
+        if any(keyword in content for keyword in ['会員登録', 'バーズハウス'] + ['会員登録がありました']):
+            return "[バーズハウス] 会員登録がありました"
+        
         # Check for event/visit reservation inquiries
         if any(keyword in content for keyword in ['来場予約', '来場希望', '見学予約', '見学希望', 'イベント参加', 'イベント申込']):
             return "[桧家住宅] イベントの参加お申し込みがありました"
-    
+        
         # Check for member information changes
         if any(keyword in content for keyword in ['会員情報変更', '情報変更', '会員情報更新']):
             return "[桧家住宅] 会員情報の変更がありました"
-    
+        
         # Check for member withdrawal/cancellation
         if any(keyword in content for keyword in ['退会', '会員退会', '退会しました']):
             return "[桧家住宅] 会員の退会がありました"
-    
+        
         # Check for general inquiries about properties
         if any(keyword in content for keyword in ['分譲住宅', '物件', '住宅', '問い合わせ', '問合せ']):
             return "[桧家住宅] 分譲住宅へのお問い合わせがありました"
-    
+        
         # Check for resource requests
         if any(keyword in content for keyword in ['資料請求', '資料希望', 'カタログ請求']):
             return "[桧家住宅] 資料請求がありました"
-    
+        
         # Check for contact form submissions
         if any(keyword in content for keyword in ['お問い合わせフォーム', 'コンタクト', 'フォーム']):
             return "[桧家住宅] お問い合わせフォームからの連絡がありました"
-    
+        
         # Check subject line for clues if content doesn't match
         if any(keyword in subject_lower for keyword in ['イベント', 'event', '参加', '申込', '申し込み']):
             return "[桧家住宅] イベントの参加お申し込みがありました"
-    
+        
         if any(keyword in subject_lower for keyword in ['問い合わせ', '問合せ', 'inquiry', 'contact']):
             return "[桧家住宅] お問い合わせがありました"
-    
+        
         # Default fallback
         return "[桧家住宅] お問い合わせがありました"
     
@@ -434,39 +463,40 @@ class EmailDataExtractor:
     
     def _extract_preferred_time(self, content: str) -> str:
         """Extract preferred time"""
-        if '午前' in content or 'AM' in content or '9:' in content or '10:' in content or '11:' in content:
-            return '午前'
-        elif '午後' in content or 'PM' in content or '13:' in content or '14:' in content or '15:' in content or '16:' in content:
-            return '午後'
-        return '午後'  # Default
-    
-    def _extract_name(self, content: str) -> str:
-        """Extract customer name"""
-        # Japanese name patterns
-        patterns = [
-            r'お名前[\s:：]*([^\n\r]+)',
-            r'氏名[\s:：]*([^\n\r]+)',
-            r'名前[\s:：]*([^\n\r]+)',
+        # Look for specific time patterns first
+        time_patterns = [
+            r'ご希望時間[\s:：]*([^\n\r]+)',
+            r'希望時間[\s:：]*([^\n\r]+)',
+            r'時間[\s:：]*([^\n\r]+)',
         ]
         
-        for pattern in patterns:
+        for pattern in time_patterns:
             match = re.search(pattern, content)
             if match:
-                name = match.group(1).strip()
-                # Clean up unwanted characters and symbols
-                name = re.sub(r'[】【\[\]()（）]', '', name)  # Remove brackets
-                name = re.sub(r'[\s]+', ' ', name)  # Normalize whitespace
-                name = name.strip()
-                return name
+                time_text = match.group(1).strip()
+                # Parse the time to determine 午前/午後
+                if any(x in time_text for x in ['9:', '10:', '11:', '午前', 'AM']):
+                    return '午前'
+                elif any(x in time_text for x in ['12:', '13:', '14:', '15:', '16:', '17:', '18:', '午後', 'PM']):
+                    return '午後'
+                else:
+                    return time_text  # Return the actual time if found
         
-        return ""
+        # Fallback to general content analysis
+        if any(x in content for x in ['午前', 'AM', '9:', '10:', '11:']):
+            return '午前'
+        elif any(x in content for x in ['午後', 'PM', '13:', '14:', '15:', '16:']):
+            return '午後'
+            
+        return '午後'  # Default
     
     def _extract_furigana(self, content: str) -> str:
         """Extract furigana (phonetic reading)"""
         patterns = [
-            r'フリガナ[\s:：]*([^\n\r]+)',
-            r'ふりがな[\s:：]*([^\n\r]+)',
-            r'カナ[\s:：]*([^\n\r]+)',
+            r'▼フリガナ▼\s*([^\n\r▼]+)',
+            r'フリガナ[\s:：]*([^\n\r▼]+)',
+            r'ふりがな[\s:：]*([^\n\r▼]+)',
+            r'カナ[\s:：]*([^\n\r▼]+)',
         ]
         
         for pattern in patterns:
@@ -474,7 +504,7 @@ class EmailDataExtractor:
             if match:
                 furigana = match.group(1).strip()
                 # Clean up unwanted characters and symbols
-                furigana = re.sub(r'[】【\[\]()（）]', '', furigana)  # Remove brackets
+                furigana = re.sub(r'[】【\[\]()（）▼]', '', furigana)  # Remove brackets and arrows
                 furigana = re.sub(r'[\s]+', ' ', furigana)  # Normalize whitespace
                 furigana = furigana.strip()
                 return furigana
@@ -495,7 +525,7 @@ class EmailDataExtractor:
             if match:
                 date_text = match.group(1).strip()
                 # Clean up unwanted characters
-                date_text = re.sub(r'[】【\[\]()（）]', '', date_text)
+                date_text = re.sub(r'[】【\[\]()（）▼]', '', date_text)
                 
                 # Parse different date formats
                 # Format: 2025年09月28日 or 2025/09/28
@@ -528,7 +558,7 @@ class EmailDataExtractor:
             if match:
                 time_text = match.group(1).strip()
                 # Clean up unwanted characters
-                time_text = re.sub(r'[】【\[\]()（）]', '', time_text)
+                time_text = re.sub(r'[】【\[\]()（）▼]', '', time_text)
                 
                 # Extract time in various formats
                 time_patterns = [
@@ -546,71 +576,6 @@ class EmailDataExtractor:
                 return time_text  # Return as-is if no pattern matches
         
         return ""
-    
-    def _extract_trigger(self, content: str) -> str:
-        """Extract what triggered the inquiry"""
-        patterns = [
-            r'予約のきっかけ[\s:：]*([^\n\r]+)',
-            r'きっかけ[\s:：]*([^\n\r]+)',
-            r'経由[\s:：]*([^\n\r]+)',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, content)
-            if match:
-                trigger = match.group(1).strip()
-        # Clean up unwanted characters and symbols
-                trigger = re.sub(r'[】【\[\]()（）]', '', trigger)  # Remove brackets
-                trigger = re.sub(r'[\s]+', ' ', trigger)  # Normalize whitespace
-                trigger = trigger.strip()
-                return trigger
-        
-        # Check for common triggers in content
-        trigger_map = {
-            'HP検索': 'ウェブサイト',
-            'インスタグラム': 'インスタグラム',
-            'Facebook': 'Facebook',
-            'Google': 'ウェブサイト',
-            'チラシ': 'チラシ',
-            '紹介': '紹介',
-            'ホームページ': 'ウェブサイト',
-            'ネット': 'ウェブサイト'
-        }
-        
-        for key, value in trigger_map.items():
-            if key in content:
-                return value
-        
-        return "ウェブサイト"  # Default
-    
-    def _extract_preferred_time(self, content: str) -> str:
-        """Extract preferred time"""
-        # Look for specific time patterns first
-        time_patterns = [
-            r'ご希望時間[\s:：]*([^\n\r]+)',
-            r'希望時間[\s:：]*([^\n\r]+)',
-            r'時間[\s:：]*([^\n\r]+)',
-        ]
-        
-        for pattern in time_patterns:
-            match = re.search(pattern, content)
-            if match:
-                time_text = match.group(1).strip()
-                # Parse the time to determine 午前/午後
-                if any(x in time_text for x in ['9:', '10:', '11:', '午前', 'AM']):
-                    return '午前'
-                elif any(x in time_text for x in ['12:', '13:', '14:', '15:', '16:', '17:', '18:', '午後', 'PM']):
-                    return '午後'
-                else:
-                    return time_text  # Return the actual time if found
-        
-        # Fallback to general content analysis
-        if any(x in content for x in ['午前', 'AM', '9:', '10:', '11:']):
-            return '午前'
-        elif any(x in content for x in ['午後', 'PM', '13:', '14:', '15:', '16:']):
-            return '午後'
-            
-        return '午後'  # Default
 
 class GmailEmailMonitor:
     def __init__(self):
