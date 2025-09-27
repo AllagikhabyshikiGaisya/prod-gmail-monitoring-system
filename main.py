@@ -344,6 +344,7 @@ class EmailDataExtractor:
         """Extract phone number"""
         patterns = [
             r'電話番号[\s:：]*([0-9\-]+)',
+            r'【電話番号】[\s:：]*([0-9\-]+)',
             r'TEL[\s:：]*([0-9\-]+)',
             r'Tel[\s:：]*([0-9\-]+)',
         ]
@@ -351,7 +352,11 @@ class EmailDataExtractor:
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                return match.group(1).strip()
+                phone = match.group(1).strip()
+                phone = re.sub(r'[】【\[\]()（）]', '', phone)  # Remove brackets
+                phone = re.sub(r'[\s]+', ' ', phone)  # Normalize whitespace
+                phone = phone.strip()
+                return phone
         
         return ""
     
