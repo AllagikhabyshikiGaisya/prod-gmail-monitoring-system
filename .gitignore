@@ -1,0 +1,58 @@
+Enumerating objects: 19, done.
+Counting objects: 100% (19/19), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (15/15), done.
+Writing objects: 100% (18/18), 42.92 KiB | 2.52 MiB/s, done.
+Total 18 (delta 2), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (2/2), done.
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: 
+remote: - GITHUB PUSH PROTECTION
+remote:   —————————————————————————————————————————
+remote:     Resolve the following violations before pushing again
+remote: 
+remote:     - Push cannot contain secrets
+remote: 
+remote:
+remote:      (?) Learn how to resolve a blocked push
+remote:      https://docs.github.com/code-security/secret-scanning/working-with-secret-scanning-and-push-protection/working-with-push-protection-from-the-command-line#resolving-a-blocked-push
+remote:
+remote:
+remote:       —— Google OAuth Client ID ————————————————————————————
+remote:        locations:
+remote:          - commit: dd91e40d23f2a5b46a81398451fd190d8c74945e
+remote:            path: new_credentials.env:1
+remote:
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.
+remote:        https://github.com/AllagikhabyshikiGaisya/prod-gmail-monitoring-system/security/secret-scanning/unblock-secret/33GZgFsZc6aXmkRaBDdw9DaHxtK
+remote:
+remote:
+remote:       —— Google OAuth Client Secret ————————————————————————
+remote:        locations:
+remote:          - commit: dd91e40d23f2a5b46a81398451fd190d8c74945e
+remote:            path: new_credentials.env:2
+remote:
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.
+remote:        https://github.com/AllagikhabyshikiGaisya/prod-gmail-monitoring-system/security/secret-scanning/unblock-secret/33GZgHvHPEffrM3zceuu98EIRSr
+remote:
+remote:
+remote:       —— Google OAuth Refresh Token ————————————————————————
+remote:        locations:
+remote:          - commit: dd91e40d23f2a5b46a81398451fd190d8c74945e
+remote:            path: new_credentials.env:3
+remote:
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.
+remote:        https://github.com/AllagikhabyshikiGaisya/prod-gmail-monitoring-system/security/secret-scanning/unblock-secret/33GZgKeaielwHRYqsDzYodiDxbi
+remote:
+remote:
+remote:
+To https://github.com/AllagikhabyshikiGaisya/prod-gmail-monitoring-system.git
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/AllagikhabyshikiGaisya/prod-gmail-monitoring-system.git'       
+(venv) PS C:\gmail monitoring system> 
+
+# Ignore local env and credentials
+.env
+*.env
+credentials.json
+venv
