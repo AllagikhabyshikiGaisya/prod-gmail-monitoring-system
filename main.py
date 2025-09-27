@@ -328,7 +328,12 @@ class EmailDataExtractor:
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
-                return match.group(1).strip()
+                address = match.group(1).strip()
+            # Clean up unwanted characters and symbols
+                address = re.sub(r'[】【\[\]()（）]', '', address)  # Remove brackets
+                address = re.sub(r'[\s]+', ' ', address)  # Normalize whitespace
+                address = address.strip()
+                return address
         
         return ""
     
@@ -512,6 +517,10 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 trigger = match.group(1).strip()
+        # Clean up unwanted characters and symbols
+                trigger = re.sub(r'[】【\[\]()（）]', '', trigger)  # Remove brackets
+                trigger = re.sub(r'[\s]+', ' ', trigger)  # Normalize whitespace
+                trigger = trigger.strip()
                 return trigger
         
         # Check for common triggers in content
