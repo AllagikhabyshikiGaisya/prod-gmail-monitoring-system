@@ -381,14 +381,48 @@ class EmailDataExtractor:
         
         return "ウェブサイト"  # Default
     
+    # Replace the _extract_title method (around line 423) with this updated version:
+
     def _extract_title(self, content: str, subject: str) -> str:
-        """Extract or generate title"""
-        if '来場予約' in content:
-            return '来場予約'
-        elif '問い合わせ' in content or '問合せ' in content:
-            return '物件問い合わせ'
-        else:
-            return subject
+        """Extract or generate title based on email content and sender"""
+    
+        # Clean up content for better matching
+        content_lower = content.lower()
+        subject_lower = subject.lower()
+    
+        # Check for event/visit reservation inquiries
+        if any(keyword in content for keyword in ['来場予約', '来場希望', '見学予約', '見学希望', 'イベント参加', 'イベント申込']):
+            return "[桧家住宅] イベントの参加お申し込みがありました"
+    
+        # Check for member information changes
+        if any(keyword in content for keyword in ['会員情報変更', '情報変更', '会員情報更新']):
+            return "[桧家住宅] 会員情報の変更がありました"
+    
+        # Check for member withdrawal/cancellation
+        if any(keyword in content for keyword in ['退会', '会員退会', '退会しました']):
+            return "[桧家住宅] 会員の退会がありました"
+    
+        # Check for general inquiries about properties
+        if any(keyword in content for keyword in ['分譲住宅', '物件', '住宅', '問い合わせ', '問合せ']):
+            return "[桧家住宅] 分譲住宅へのお問い合わせがありました"
+    
+        # Check for resource requests
+        if any(keyword in content for keyword in ['資料請求', '資料希望', 'カタログ請求']):
+            return "[桧家住宅] 資料請求がありました"
+    
+        # Check for contact form submissions
+        if any(keyword in content for keyword in ['お問い合わせフォーム', 'コンタクト', 'フォーム']):
+            return "[桧家住宅] お問い合わせフォームからの連絡がありました"
+    
+        # Check subject line for clues if content doesn't match
+        if any(keyword in subject_lower for keyword in ['イベント', 'event', '参加', '申込', '申し込み']):
+            return "[桧家住宅] イベントの参加お申し込みがありました"
+    
+        if any(keyword in subject_lower for keyword in ['問い合わせ', '問合せ', 'inquiry', 'contact']):
+            return "[桧家住宅] お問い合わせがありました"
+    
+        # Default fallback
+        return "[桧家住宅] お問い合わせがありました"
     
     def _extract_url(self, content: str) -> str:
         """Extract URL if present"""
