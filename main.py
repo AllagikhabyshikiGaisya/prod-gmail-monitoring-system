@@ -38,9 +38,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # First, check if we need to migrate existing tables
-        self._migrate_existing_tables(cursor)
-        
+        # FIRST: Create all tables if they don't exist
         # Table for processed emails
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS processed_emails (
@@ -103,6 +101,12 @@ class DatabaseManager:
                 stack_trace TEXT
             )
         ''')
+        
+        # Commit table creation before migration
+        conn.commit()
+        
+        # SECOND: Now that tables exist, run migrations for existing databases
+        self._migrate_existing_tables(cursor)
         
         conn.commit()
         conn.close()
