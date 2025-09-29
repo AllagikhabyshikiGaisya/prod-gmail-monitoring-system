@@ -4,7 +4,7 @@ import time
 import re
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 import base64
 from email.mime.text import MIMEText
@@ -24,6 +24,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Deduplication configuration (in hours)
+DEDUPLICATION_WINDOW_HOURS = int(os.environ.get('DEDUP_WINDOW_HOURS', '24'))
 
 class DatabaseManager:
     def __init__(self, db_path='email_monitor.db'):
@@ -45,8 +48,34 @@ class DatabaseManager:
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 extracted_data TEXT,
                 webhook_sent BOOLEAN DEFAULT FALSE,
-                archived BOOLEAN DEFAULT FALSE
+                archived BOOLEAN DEFAULT FALSE,
+                customer_email TEXT,
+                is_duplicate BOOLEAN DEFAULT FALSE
             )
+        ''')
+        
+        # Table for customer deduplication tracking
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS customer_submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_email TEXT NOT NULL,
+                first_submission_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_submission_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                submission_count INTEGER DEFAULT 1,
+                first_message_id TEXT,
+                last_message_id TEXT
+            )
+        ''')
+        
+        # Index for faster customer email lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_customer_email 
+            ON customer_submissions(customer_email)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_customer_last_submission 
+            ON customer_submissions(customer_email, last_submission_at)
         ''')
         
         # Table for logs
@@ -74,16 +103,94 @@ class DatabaseManager:
         conn.commit()
         conn.close()
     
-    def add_processed_email(self, message_id: str, sender_email: str, subject: str, extracted_data: Dict):
+    def is_customer_recently_processed(self, customer_email: str, window_hours: int = DEDUPLICATION_WINDOW_HOURS) -> Dict:
+        """Check if customer email was processed recently within the window"""
+        if not customer_email or customer_email == "":
+            return {'is_duplicate': False, 'previous_submission': None}
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Calculate the time threshold
+        threshold = datetime.now() - timedelta(hours=window_hours)
+        threshold_str = threshold.strftime('%Y-%m-%d %H:%M:%S')
+        
+        cursor.execute('''
+            SELECT customer_email, first_submission_at, last_submission_at, 
+                   submission_count, first_message_id
+            FROM customer_submissions 
+            WHERE customer_email = ? AND last_submission_at > ?
+            ORDER BY last_submission_at DESC
+            LIMIT 1
+        ''', (customer_email, threshold_str))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                'is_duplicate': True,
+                'previous_submission': {
+                    'customer_email': result[0],
+                    'first_submission_at': result[1],
+                    'last_submission_at': result[2],
+                    'submission_count': result[3],
+                    'first_message_id': result[4]
+                }
+            }
+        
+        return {'is_duplicate': False, 'previous_submission': None}
+    
+    def record_customer_submission(self, customer_email: str, message_id: str):
+        """Record or update customer submission"""
+        if not customer_email or customer_email == "":
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Check if customer exists
+        cursor.execute('''
+            SELECT id, submission_count, first_message_id 
+            FROM customer_submissions 
+            WHERE customer_email = ?
+        ''', (customer_email,))
+        
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing record
+            cursor.execute('''
+                UPDATE customer_submissions 
+                SET last_submission_at = CURRENT_TIMESTAMP,
+                    submission_count = submission_count + 1,
+                    last_message_id = ?
+                WHERE customer_email = ?
+            ''', (message_id, customer_email))
+        else:
+            # Insert new record
+            cursor.execute('''
+                INSERT INTO customer_submissions 
+                (customer_email, first_message_id, last_message_id)
+                VALUES (?, ?, ?)
+            ''', (customer_email, message_id, message_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def add_processed_email(self, message_id: str, sender_email: str, subject: str, 
+                           extracted_data: Dict, is_duplicate: bool = False):
         """Add a processed email to the database"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        customer_email = extracted_data.get('顧客メール', '')
+        
         cursor.execute('''
             INSERT OR REPLACE INTO processed_emails 
-            (message_id, sender_email, subject, extracted_data)
-            VALUES (?, ?, ?, ?)
-        ''', (message_id, sender_email, subject, json.dumps(extracted_data)))
+            (message_id, sender_email, subject, extracted_data, customer_email, is_duplicate)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (message_id, sender_email, subject, json.dumps(extracted_data), customer_email, is_duplicate))
         
         conn.commit()
         conn.close()
@@ -193,13 +300,35 @@ class DatabaseManager:
         cursor.execute('SELECT COUNT(*) FROM processed_emails WHERE archived = TRUE')
         archived = cursor.fetchone()[0]
         
+        cursor.execute('SELECT COUNT(*) FROM processed_emails WHERE is_duplicate = TRUE')
+        duplicates_skipped = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(DISTINCT customer_email) FROM customer_submissions WHERE customer_email != ""')
+        unique_customers = cursor.fetchone()[0]
+        
         conn.close()
         
         return {
             'total_processed': total,
             'webhook_sent': webhook_sent,
-            'archived': archived
+            'archived': archived,
+            'duplicates_skipped': duplicates_skipped,
+            'unique_customers': unique_customers
         }
+    
+    def get_customer_submission_history(self, customer_email: str):
+        """Get submission history for a specific customer"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM customer_submissions WHERE customer_email = ?
+        ''', (customer_email,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result
 
 class EmailDataExtractor:
     """Extract structured data from email content"""
@@ -212,7 +341,7 @@ class EmailDataExtractor:
         
         # Base template matching your JSON format
         extracted_data = {
-            "sender_email": sender_email,  # This will now be clean email only
+            "sender_email": sender_email,
             "subject": subject,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "問合せ番号": self._extract_inquiry_number(email_content, subject),
@@ -221,7 +350,7 @@ class EmailDataExtractor:
             "郵便番号": self._extract_postal_code(email_content),
             "住所": self._extract_address(email_content),
             "電話番号": self._extract_phone_number(email_content),
-            "電話番号_2": "",  # Secondary phone if available
+            "電話番号_2": "",
             "きっかけ": self._extract_trigger(email_content),
             "件名": subject,
             "タイトル": self._extract_title(email_content, subject),
@@ -229,28 +358,25 @@ class EmailDataExtractor:
             "希望時間": self._extract_preferred_time(email_content),
             "ふりがな": self._extract_furigana(email_content),
             "message_id": message_id,
-            "顧客メール": customer_email,  # Customer email field
-            "来場希望日": self._extract_visit_date(email_content),  # Desired visit date
-            "希望訪問時間": self._extract_visit_time(email_content)  # Desired visit time in HH:MM
+            "顧客メール": customer_email,
+            "来場希望日": self._extract_visit_date(email_content),
+            "希望訪問時間": self._extract_visit_time(email_content)
         }
         
         return extracted_data
     
     def _extract_inquiry_number(self, content: str, subject: str) -> str:
         """Extract inquiry number from content or generate one"""
-        # Look for patterns like ABC-123, REQ-456, etc.
         pattern = r'[A-Z]{2,4}-\d{3,6}'
         match = re.search(pattern, content)
         if match:
             return match.group()
         
-        # Generate a simple inquiry number based on timestamp
         timestamp = datetime.now().strftime("%Y%m%d%H%M")
         return f"INQ-{timestamp}"
     
     def _extract_inquiry_datetime(self, content: str) -> str:
         """Extract inquiry datetime"""
-        # Look for Japanese date patterns
         date_patterns = [
             r'(\d{4})[/年](\d{1,2})[/月](\d{1,2})[\s日]*(\d{1,2}):(\d{2})',
             r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})',
@@ -262,12 +388,10 @@ class EmailDataExtractor:
                 year, month, day, hour, minute = match.groups()
                 return f"{year}-{month.zfill(2)}-{day.zfill(2)} {hour}:{minute}"
         
-        # Default to current time if not found
         return datetime.now().strftime("%Y-%m-%d %H:%M")
     
     def _extract_name(self, content: str) -> str:
         """Extract customer name"""
-        # Japanese name patterns
         patterns = [
             r'▼お名前▼\s*([^\n\r▼]+)',
             r'お名前[\s:：]*([^\n\r▼]+)',
@@ -279,9 +403,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 name = match.group(1).strip()
-                # Clean up unwanted characters and symbols
-                name = re.sub(r'[】【\[\]()（）▼]', '', name)  # Remove brackets and arrows
-                name = re.sub(r'[\s]+', ' ', name)  # Normalize whitespace
+                name = re.sub(r'[】【\[\]()（）▼]', '', name)
+                name = re.sub(r'[\s]+', ' ', name)
                 name = name.strip()
                 return name
         
@@ -295,7 +418,6 @@ class EmailDataExtractor:
             r'メールアドレス[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
             r'E-mail[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
             r'Email[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
-            # General email pattern as fallback
             r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
         ]
         
@@ -303,9 +425,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 email = match.group(1).strip()
-                # Clean up any remaining unwanted characters
                 email = re.sub(r'[▼【】\s]', '', email)
-                return email
+                return email.lower()  # Normalize to lowercase
         
         return ""
     
@@ -322,7 +443,7 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 postal = match.group(1).replace('〒', '')
-                postal = re.sub(r'[】【\[\]()（）▼\s]', '', postal)  # Remove brackets and arrows
+                postal = re.sub(r'[】【\[\]()（）▼\s]', '', postal)
                 postal = postal.strip()
                 if '-' not in postal and len(postal) == 7:
                     postal = postal[:3] + '-' + postal[3:]
@@ -342,9 +463,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 address = match.group(1).strip()
-                # Clean up unwanted characters and symbols
-                address = re.sub(r'[】【\[\]()（）▼]', '', address)  # Remove brackets and arrows
-                address = re.sub(r'[\s]+', ' ', address)  # Normalize whitespace
+                address = re.sub(r'[】【\[\]()（）▼]', '', address)
+                address = re.sub(r'[\s]+', ' ', address)
                 address = address.strip()
                 return address
         
@@ -353,7 +473,7 @@ class EmailDataExtractor:
     def _extract_phone_number(self, content: str) -> str:
         """Extract phone number"""
         patterns = [
-            r'【電話番号1】\s*([0-9\-]+)',  # NEW: Specifically for 【電話番号1】
+            r'【電話番号1】\s*([0-9\-]+)',
             r'【電話番号】\s*([0-9\-]+)',
             r'▼電話番号▼\s*([0-9\-]+)',
             r'電話番号[\s:：]*([0-9\-]+)',
@@ -366,8 +486,7 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 phone = match.group(1).strip()
-                # Clean up unwanted characters and symbols - keep only numbers and hyphens
-                phone = re.sub(r'[】【\[\]()（）▼\s]', '', phone)  # Remove brackets and arrows but not hyphens
+                phone = re.sub(r'[】【\[\]()（）▼\s]', '', phone)
                 return phone
         
         return ""
@@ -386,13 +505,11 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 trigger = match.group(1).strip()
-                # Clean up unwanted characters and symbols
-                trigger = re.sub(r'[】【\[\]()（）▼]', '', trigger)  # Remove brackets and arrows
-                trigger = re.sub(r'[\s]+', ' ', trigger)  # Normalize whitespace
+                trigger = re.sub(r'[】【\[\]()（）▼]', '', trigger)
+                trigger = re.sub(r'[\s]+', ' ', trigger)
                 trigger = trigger.strip()
                 return trigger
         
-        # Check for common triggers in content
         trigger_map = {
             'HP検索': 'ウェブサイト',
             'インスタグラム': 'インスタグラム',
@@ -409,51 +526,40 @@ class EmailDataExtractor:
             if key in content:
                 return value
         
-        return "ウェブサイト"  # Default
+        return "ウェブサイト"
     
     def _extract_title(self, content: str, subject: str) -> str:
         """Extract or generate title based on email content and sender"""
-        
-        # Clean up content for better matching
         content_lower = content.lower()
         subject_lower = subject.lower()
 
-        # Check for member registration (会員登録)
         if any(keyword in content for keyword in ['会員登録', 'バーズハウス'] + ['会員登録がありました']):
             return "[バーズハウス] 会員登録がありました"
         
-        # Check for event/visit reservation inquiries
         if any(keyword in content for keyword in ['来場予約', '来場希望', '見学予約', '見学希望', 'イベント参加', 'イベント申込']):
             return "[桧家住宅] イベントの参加お申し込みがありました"
         
-        # Check for member information changes
         if any(keyword in content for keyword in ['会員情報変更', '情報変更', '会員情報更新']):
             return "[桧家住宅] 会員情報の変更がありました"
         
-        # Check for member withdrawal/cancellation
         if any(keyword in content for keyword in ['退会', '会員退会', '退会しました']):
             return "[桧家住宅] 会員の退会がありました"
         
-        # Check for general inquiries about properties
         if any(keyword in content for keyword in ['分譲住宅', '物件', '住宅', '問い合わせ', '問合せ']):
             return "[桧家住宅] 分譲住宅へのお問い合わせがありました"
         
-        # Check for resource requests
         if any(keyword in content for keyword in ['資料請求', '資料希望', 'カタログ請求']):
             return "[桧家住宅] 資料請求がありました"
         
-        # Check for contact form submissions
         if any(keyword in content for keyword in ['お問い合わせフォーム', 'コンタクト', 'フォーム']):
             return "[桧家住宅] お問い合わせフォームからの連絡がありました"
         
-        # Check subject line for clues if content doesn't match
         if any(keyword in subject_lower for keyword in ['イベント', 'event', '参加', '申込', '申し込み']):
             return "[桧家住宅] イベントの参加お申し込みがありました"
         
         if any(keyword in subject_lower for keyword in ['問い合わせ', '問合せ', 'inquiry', 'contact']):
             return "[桧家住宅] お問い合わせがありました"
         
-        # Default fallback
         return "[桧家住宅] お問い合わせがありました"
     
     def _extract_url(self, content: str) -> str:
@@ -462,11 +568,10 @@ class EmailDataExtractor:
         match = re.search(url_pattern, content)
         if match:
             return match.group()
-        return "https://example.com/123"  # Default
+        return "https://example.com/123"
     
     def _extract_preferred_time(self, content: str) -> str:
         """Extract preferred time"""
-        # Look for specific time patterns first
         time_patterns = [
             r'ご希望時間[\s:：]*([^\n\r]+)',
             r'希望時間[\s:：]*([^\n\r]+)',
@@ -477,21 +582,19 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 time_text = match.group(1).strip()
-                # Parse the time to determine 午前/午後
                 if any(x in time_text for x in ['9:', '10:', '11:', '午前', 'AM']):
                     return '午前'
                 elif any(x in time_text for x in ['12:', '13:', '14:', '15:', '16:', '17:', '18:', '午後', 'PM']):
                     return '午後'
                 else:
-                    return time_text  # Return the actual time if found
+                    return time_text
         
-        # Fallback to general content analysis
         if any(x in content for x in ['午前', 'AM', '9:', '10:', '11:']):
             return '午前'
         elif any(x in content for x in ['午後', 'PM', '13:', '14:', '15:', '16:']):
             return '午後'
             
-        return '午後'  # Default
+        return '午後'
     
     def _extract_furigana(self, content: str) -> str:
         """Extract furigana (phonetic reading)"""
@@ -506,9 +609,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 furigana = match.group(1).strip()
-                # Clean up unwanted characters and symbols
-                furigana = re.sub(r'[】【\[\]()（）▼]', '', furigana)  # Remove brackets and arrows
-                furigana = re.sub(r'[\s]+', ' ', furigana)  # Normalize whitespace
+                furigana = re.sub(r'[】【\[\]()（）▼]', '', furigana)
+                furigana = re.sub(r'[\s]+', ' ', furigana)
                 furigana = furigana.strip()
                 return furigana
         
@@ -527,11 +629,8 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 date_text = match.group(1).strip()
-                # Clean up unwanted characters
                 date_text = re.sub(r'[】【\[\]()（）▼]', '', date_text)
                 
-                # Parse different date formats
-                # Format: 2025年09月28日 or 2025/09/28
                 date_patterns = [
                     r'(\d{4})年(\d{1,2})月(\d{1,2})日',
                     r'(\d{4})[/年](\d{1,2})[/月](\d{1,2})[日]?',
@@ -544,7 +643,7 @@ class EmailDataExtractor:
                         year, month, day = date_match.groups()
                         return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                 
-                return date_text  # Return as-is if no pattern matches
+                return date_text
         
         return ""
     
@@ -560,14 +659,12 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 time_text = match.group(1).strip()
-                # Clean up unwanted characters
                 time_text = re.sub(r'[】【\[\]()（）▼]', '', time_text)
                 
-                # Extract time in various formats
                 time_patterns = [
-                    r'(\d{1,2}):(\d{2})(?:～|〜|-|から)?(?:\d{1,2}:\d{2})?',  # 14:30～16:00 or 14:30
-                    r'(\d{1,2})時(\d{2})分',  # 14時30分
-                    r'(\d{1,2})[:：時](\d{2})',  # 14:30 or 14時30
+                    r'(\d{1,2}):(\d{2})(?:～|〜|-|から)?(?:\d{1,2}:\d{2})?',
+                    r'(\d{1,2})時(\d{2})分',
+                    r'(\d{1,2})[:：時](\d{2})',
                 ]
                 
                 for time_pattern in time_patterns:
@@ -576,7 +673,7 @@ class EmailDataExtractor:
                         hour, minute = time_match.groups()
                         return f"{hour.zfill(2)}:{minute.zfill(2)}"
                 
-                return time_text  # Return as-is if no pattern matches
+                return time_text
         
         return ""
 
@@ -590,7 +687,6 @@ class GmailEmailMonitor:
     def setup_gmail_service(self):
         """Setup Gmail API service using OAuth2 credentials"""
         try:
-            # Load credentials from environment variables
             creds = Credentials(
                 token=None,
                 refresh_token=os.environ['GMAIL_REFRESH_TOKEN'],
@@ -601,15 +697,11 @@ class GmailEmailMonitor:
                 scopes=['https://www.googleapis.com/auth/gmail.modify']
             )
             
-            # Refresh the credentials to get a valid access token
             from google.auth.transport.requests import Request
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             
-            # Build the Gmail service
             self.service = build('gmail', 'v1', credentials=creds)
-            
-            # Test the connection
             self.service.users().getProfile(userId='me').execute()
             
             logger.info("Gmail service initialized successfully")
@@ -624,7 +716,6 @@ class GmailEmailMonitor:
     def get_latest_emails(self, max_results: int = 10) -> List[Dict]:
         """Get latest emails from Gmail inbox"""
         try:
-            # Search for emails in inbox
             results = self.service.users().messages().list(
                 userId='me',
                 q='in:inbox',
@@ -637,18 +728,15 @@ class GmailEmailMonitor:
             for message in messages:
                 message_id = message['id']
                 
-                # Skip if already processed
                 if self.db.is_email_processed(message_id):
                     continue
                 
-                # Get full message
                 full_message = self.service.users().messages().get(
                     userId='me',
                     id=message_id,
                     format='full'
                 ).execute()
                 
-                # Extract email data
                 email_data = self._parse_email_message(full_message)
                 if email_data:
                     emails.append(email_data)
@@ -669,7 +757,6 @@ class GmailEmailMonitor:
         try:
             headers = message['payload'].get('headers', [])
             
-            # Extract headers
             subject = ''
             sender_email = ''
             date = ''
@@ -682,7 +769,6 @@ class GmailEmailMonitor:
                 elif header['name'] == 'Date':
                     date = header['value']
             
-            # Extract body
             body = self._extract_email_body(message['payload'])
             
             if not body:
@@ -704,15 +790,12 @@ class GmailEmailMonitor:
         """Extract just the email address from 'Name <email@domain.com>' format"""
         import re
         
-        # Pattern to match email address in angle brackets or standalone
         email_pattern = r'<([^>]+@[^>]+)>|([^\s<>]+@[^\s<>]+)'
         
         match = re.search(email_pattern, from_field)
         if match:
-            # Return the email address (either from angle brackets or standalone)
             return match.group(1) if match.group(1) else match.group(2)
         
-        # If no pattern matches, return the original string
         return from_field.strip()
     
     def _extract_email_body(self, payload: Dict) -> str:
@@ -764,23 +847,74 @@ class GmailEmailMonitor:
                         email['message_id']
                     )
                     
+                    customer_email = extracted_data.get('顧客メール', '')
+                    
+                    # Check for duplicate customer submission
+                    dedup_result = self.db.is_customer_recently_processed(
+                        customer_email, 
+                        DEDUPLICATION_WINDOW_HOURS
+                    )
+                    
+                    if dedup_result['is_duplicate']:
+                        # This is a duplicate submission
+                        prev = dedup_result['previous_submission']
+                        logger.info(
+                            f"⚠️ DUPLICATE DETECTED - Customer email: {customer_email} "
+                            f"was already submitted at {prev['last_submission_at']} "
+                            f"(Total submissions: {prev['submission_count']})"
+                        )
+                        self.db.add_log(
+                            'WARNING', 
+                            f"Duplicate customer submission blocked: {customer_email} "
+                            f"(Previous: {prev['last_submission_at']}, Count: {prev['submission_count']})",
+                            'deduplication'
+                        )
+                        
+                        # Save to database but mark as duplicate
+                        self.db.add_processed_email(
+                            email['message_id'],
+                            email['sender_email'],
+                            email['subject'],
+                            extracted_data,
+                            is_duplicate=True
+                        )
+                        
+                        # Update customer submission record
+                        self.db.record_customer_submission(customer_email, email['message_id'])
+                        
+                        # Archive the email without sending webhook
+                        self.archive_email(email['message_id'])
+                        
+                        logger.info(f"Duplicate email {email['message_id']} archived without webhook")
+                        continue
+                    
+                    # Not a duplicate - process normally
+                    logger.info(f"✅ New customer submission from: {customer_email}")
+                    
                     # Save to database
                     self.db.add_processed_email(
                         email['message_id'],
                         email['sender_email'],
                         email['subject'],
-                        extracted_data
+                        extracted_data,
+                        is_duplicate=False
                     )
+                    
+                    # Record customer submission
+                    self.db.record_customer_submission(customer_email, email['message_id'])
                     
                     # Send to webhook
                     if self.send_to_webhook(extracted_data):
                         self.db.mark_webhook_sent(email['message_id'])
-                        
-                        # Archive the email
                         self.archive_email(email['message_id'])
                         
                         logger.info(f"Successfully processed email: {email['message_id']}")
-                        self.db.add_log('INFO', f'Successfully processed email: {email["message_id"]}', 'processing')
+                        self.db.add_log(
+                            'INFO', 
+                            f'Successfully processed and sent webhook for: {email["message_id"]} '
+                            f'(Customer: {customer_email})', 
+                            'processing'
+                        )
                     
                 except Exception as e:
                     error_msg = f"Error processing email {email['message_id']}: {str(e)}"
@@ -837,7 +971,8 @@ def dashboard():
     return render_template('dashboard.html', 
                          stats=stats, 
                          logs=recent_logs, 
-                         errors=recent_errors)
+                         errors=recent_errors,
+                         dedup_window=DEDUPLICATION_WINDOW_HOURS)
 
 @app.route('/api/stats')
 def api_stats():
@@ -867,12 +1002,11 @@ def run_email_monitor():
             monitor.process_emails()
             logger.info("Email scan cycle completed")
             
-            # Wait 20 seconds before next scan
             time.sleep(20)
             
         except Exception as e:
             logger.error(f"Error in email monitoring loop: {str(e)}")
-            time.sleep(20)  # Wait before retrying
+            time.sleep(20)
 
 def main():
     """Main function to start the application"""
@@ -885,18 +1019,20 @@ def main():
         monitor = GmailEmailMonitor()
         print("✅ Gmail API connection successful!")
         
+        print(f"⏱️  Deduplication window: {DEDUPLICATION_WINDOW_HOURS} hours")
+        print("   (Duplicate submissions within this window will be blocked)")
+        
         print("🚀 Starting email monitoring thread...")
-        # Start email monitoring in a separate thread
         monitor_thread = threading.Thread(target=run_email_monitor)
         monitor_thread.daemon = True
         monitor_thread.start()
         print("✅ Email monitoring started!")
         
         print("🌐 Starting web dashboard...")
-        # Start Flask web dashboard
         port = int(os.environ.get('PORT', 5000))
         print(f"📊 Dashboard will be available at: http://localhost:{port}")
         print("🔄 Email scanning every 20 seconds...")
+        print("🛡️  Customer deduplication active!")
         print("Press Ctrl+C to stop the application")
         
         app.run(host='0.0.0.0', port=port, debug=False)
