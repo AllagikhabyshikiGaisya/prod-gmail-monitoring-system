@@ -304,7 +304,7 @@ class EmailDataExtractor:
             if match:
                 email = match.group(1).strip()
                 # Clean up any remaining unwanted characters
-                email = re.sub(r'[▼\s]', '', email)
+                email = re.sub(r'[▼【】\s]', '', email)
                 return email
         
         return ""
