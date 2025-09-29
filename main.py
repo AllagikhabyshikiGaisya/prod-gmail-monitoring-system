@@ -290,6 +290,7 @@ class EmailDataExtractor:
     def _extract_email_address_from_content(self, content: str) -> str:
         """Extract email address from email content (メールアドレス field)"""
         patterns = [
+            r'【メールアドレス】\s*([^\n\r\s【】]+@[^\n\r\s【】]+)',
             r'▼メールアドレス▼\s*([^\n\r\s▼]+@[^\n\r\s▼]+)',
             r'メールアドレス[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
             r'E-mail[\s:：]*([^\n\r\s▼]+@[^\n\r\s▼]+)',
@@ -352,6 +353,8 @@ class EmailDataExtractor:
     def _extract_phone_number(self, content: str) -> str:
         """Extract phone number"""
         patterns = [
+            r'【電話番号1】\s*([0-9\-]+)',  # NEW: Specifically for 【電話番号1】
+            r'【電話番号】\s*([0-9\-]+)',
             r'▼電話番号▼\s*([0-9\-]+)',
             r'電話番号[\s:：]*([0-9\-]+)',
             r'【電話番号】[\s:：]*([0-9\-]+)',
