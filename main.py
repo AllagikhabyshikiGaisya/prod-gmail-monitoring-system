@@ -38,6 +38,9 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        # First, check if we need to migrate existing tables
+        self._migrate_existing_tables(cursor)
+        
         # Table for processed emails
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS processed_emails (
@@ -102,6 +105,33 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+    
+    def _migrate_existing_tables(self, cursor):
+        """Migrate existing tables to add new columns"""
+        try:
+            # Check if customer_email column exists in processed_emails
+            cursor.execute("PRAGMA table_info(processed_emails)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'customer_email' not in columns:
+                logger.info("Migrating database: Adding customer_email column...")
+                cursor.execute('''
+                    ALTER TABLE processed_emails 
+                    ADD COLUMN customer_email TEXT
+                ''')
+            
+            if 'is_duplicate' not in columns:
+                logger.info("Migrating database: Adding is_duplicate column...")
+                cursor.execute('''
+                    ALTER TABLE processed_emails 
+                    ADD COLUMN is_duplicate BOOLEAN DEFAULT FALSE
+                ''')
+            
+            logger.info("Database migration check completed")
+            
+        except Exception as e:
+            logger.error(f"Error during database migration: {str(e)}")
+            raise
     
     def is_customer_recently_processed(self, customer_email: str, window_hours: int = DEDUPLICATION_WINDOW_HOURS) -> Dict:
         """Check if customer email was processed recently within the window"""
