@@ -62,6 +62,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS customer_submissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 customer_email TEXT NOT NULL,
+                submission_type TEXT NOT NULL,
                 first_submission_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_submission_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 submission_count INTEGER DEFAULT 1,
@@ -72,13 +73,13 @@ class DatabaseManager:
         
         # Index for faster customer email lookups
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_customer_email 
-            ON customer_submissions(customer_email)
+            CREATE INDEX IF NOT EXISTS idx_customer_submission 
+            ON customer_submissions(customer_email, submission_type)
         ''')
         
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_customer_last_submission 
-            ON customer_submissions(customer_email, last_submission_at)
+            ON customer_submissions(customer_email, submission_type, last_submission_at)
         ''')
         
         # Table for logs
@@ -127,16 +128,30 @@ class DatabaseManager:
                     ADD COLUMN is_duplicate BOOLEAN DEFAULT FALSE
                 ''')
             
+            # Check if submission_type column exists in customer_submissions
+            cursor.execute("PRAGMA table_info(customer_submissions)")
+            submission_columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'submission_type' not in submission_columns:
+                logger.info("Migrating database: Adding submission_type column...")
+                cursor.execute('''
+                    ALTER TABLE customer_submissions 
+                    ADD COLUMN submission_type TEXT DEFAULT 'unknown'
+                ''')
+            
             logger.info("Database migration check completed")
             
         except Exception as e:
             logger.error(f"Error during database migration: {str(e)}")
             raise
     
-    def is_customer_recently_processed(self, customer_email: str, window_hours: int = DEDUPLICATION_WINDOW_HOURS) -> Dict:
-        """Check if customer email was processed recently within the window"""
+    def is_customer_recently_processed(self, customer_email: str, submission_type: str, window_hours: int = DEDUPLICATION_WINDOW_HOURS) -> Dict:
+        """Check if customer email was processed recently for the same submission type within the window"""
         if not customer_email or customer_email == "":
             return {'is_duplicate': False, 'previous_submission': None}
+        
+        if not submission_type or submission_type == "":
+            submission_type = "unknown"
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -146,13 +161,13 @@ class DatabaseManager:
         threshold_str = threshold.strftime('%Y-%m-%d %H:%M:%S')
         
         cursor.execute('''
-            SELECT customer_email, first_submission_at, last_submission_at, 
+            SELECT customer_email, submission_type, first_submission_at, last_submission_at, 
                    submission_count, first_message_id
             FROM customer_submissions 
-            WHERE customer_email = ? AND last_submission_at > ?
+            WHERE customer_email = ? AND submission_type = ? AND last_submission_at > ?
             ORDER BY last_submission_at DESC
             LIMIT 1
-        ''', (customer_email, threshold_str))
+        ''', (customer_email, submission_type, threshold_str))
         
         result = cursor.fetchone()
         conn.close()
@@ -162,29 +177,33 @@ class DatabaseManager:
                 'is_duplicate': True,
                 'previous_submission': {
                     'customer_email': result[0],
-                    'first_submission_at': result[1],
-                    'last_submission_at': result[2],
-                    'submission_count': result[3],
-                    'first_message_id': result[4]
+                    'submission_type': result[1],
+                    'first_submission_at': result[2],
+                    'last_submission_at': result[3],
+                    'submission_count': result[4],
+                    'first_message_id': result[5]
                 }
             }
         
         return {'is_duplicate': False, 'previous_submission': None}
     
-    def record_customer_submission(self, customer_email: str, message_id: str):
-        """Record or update customer submission"""
+    def record_customer_submission(self, customer_email: str, submission_type: str, message_id: str):
+        """Record or update customer submission for a specific type"""
         if not customer_email or customer_email == "":
             return
+        
+        if not submission_type or submission_type == "":
+            submission_type = "unknown"
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Check if customer exists
+        # Check if customer exists for this submission type
         cursor.execute('''
             SELECT id, submission_count, first_message_id 
             FROM customer_submissions 
-            WHERE customer_email = ?
-        ''', (customer_email,))
+            WHERE customer_email = ? AND submission_type = ?
+        ''', (customer_email, submission_type))
         
         existing = cursor.fetchone()
         
@@ -195,15 +214,15 @@ class DatabaseManager:
                 SET last_submission_at = CURRENT_TIMESTAMP,
                     submission_count = submission_count + 1,
                     last_message_id = ?
-                WHERE customer_email = ?
-            ''', (message_id, customer_email))
+                WHERE customer_email = ? AND submission_type = ?
+            ''', (message_id, customer_email, submission_type))
         else:
             # Insert new record
             cursor.execute('''
                 INSERT INTO customer_submissions 
-                (customer_email, first_message_id, last_message_id)
-                VALUES (?, ?, ?)
-            ''', (customer_email, message_id, message_id))
+                (customer_email, submission_type, first_message_id, last_message_id)
+                VALUES (?, ?, ?, ?)
+            ''', (customer_email, submission_type, message_id, message_id))
         
         conn.commit()
         conn.close()
@@ -336,6 +355,9 @@ class DatabaseManager:
         cursor.execute('SELECT COUNT(DISTINCT customer_email) FROM customer_submissions WHERE customer_email != ""')
         unique_customers = cursor.fetchone()[0]
         
+        cursor.execute('SELECT COUNT(DISTINCT submission_type) FROM customer_submissions WHERE submission_type != ""')
+        unique_submission_types = cursor.fetchone()[0]
+        
         conn.close()
         
         return {
@@ -343,7 +365,8 @@ class DatabaseManager:
             'webhook_sent': webhook_sent,
             'archived': archived,
             'duplicates_skipped': duplicates_skipped,
-            'unique_customers': unique_customers
+            'unique_customers': unique_customers,
+            'unique_submission_types': unique_submission_types
         }
     
     def get_customer_submission_history(self, customer_email: str):
@@ -355,7 +378,7 @@ class DatabaseManager:
             SELECT * FROM customer_submissions WHERE customer_email = ?
         ''', (customer_email,))
         
-        result = cursor.fetchone()
+        result = cursor.fetchall()
         conn.close()
         
         return result
@@ -878,24 +901,26 @@ class GmailEmailMonitor:
                     )
                     
                     customer_email = extracted_data.get('顧客メール', '')
+                    submission_type = extracted_data.get('タイトル', email['subject'])
                     
-                    # Check for duplicate customer submission
+                    # Check for duplicate customer submission (same email + same type)
                     dedup_result = self.db.is_customer_recently_processed(
-                        customer_email, 
+                        customer_email,
+                        submission_type,
                         DEDUPLICATION_WINDOW_HOURS
                     )
                     
                     if dedup_result['is_duplicate']:
-                        # This is a duplicate submission
+                        # This is a duplicate submission for the same type
                         prev = dedup_result['previous_submission']
                         logger.info(
-                            f"⚠️ DUPLICATE DETECTED - Customer email: {customer_email} "
+                            f"⚠️ DUPLICATE DETECTED - Customer: {customer_email}, Type: {submission_type} "
                             f"was already submitted at {prev['last_submission_at']} "
                             f"(Total submissions: {prev['submission_count']})"
                         )
                         self.db.add_log(
                             'WARNING', 
-                            f"Duplicate customer submission blocked: {customer_email} "
+                            f"Duplicate submission blocked: {customer_email} - {submission_type} "
                             f"(Previous: {prev['last_submission_at']}, Count: {prev['submission_count']})",
                             'deduplication'
                         )
@@ -910,7 +935,7 @@ class GmailEmailMonitor:
                         )
                         
                         # Update customer submission record
-                        self.db.record_customer_submission(customer_email, email['message_id'])
+                        self.db.record_customer_submission(customer_email, submission_type, email['message_id'])
                         
                         # Archive the email without sending webhook
                         self.archive_email(email['message_id'])
@@ -919,7 +944,7 @@ class GmailEmailMonitor:
                         continue
                     
                     # Not a duplicate - process normally
-                    logger.info(f"✅ New customer submission from: {customer_email}")
+                    logger.info(f"✅ New submission - Customer: {customer_email}, Type: {submission_type}")
                     
                     # Save to database
                     self.db.add_processed_email(
@@ -931,7 +956,7 @@ class GmailEmailMonitor:
                     )
                     
                     # Record customer submission
-                    self.db.record_customer_submission(customer_email, email['message_id'])
+                    self.db.record_customer_submission(customer_email, submission_type, email['message_id'])
                     
                     # Send to webhook
                     if self.send_to_webhook(extracted_data):
@@ -942,7 +967,7 @@ class GmailEmailMonitor:
                         self.db.add_log(
                             'INFO', 
                             f'Successfully processed and sent webhook for: {email["message_id"]} '
-                            f'(Customer: {customer_email})', 
+                            f'(Customer: {customer_email}, Type: {submission_type})', 
                             'processing'
                         )
                     
@@ -1050,7 +1075,8 @@ def main():
         print("✅ Gmail API connection successful!")
         
         print(f"⏱️  Deduplication window: {DEDUPLICATION_WINDOW_HOURS} hours")
-        print("   (Duplicate submissions within this window will be blocked)")
+        print("   (Duplicate submissions of the SAME TYPE within this window will be blocked)")
+        print("   (Same customer can submit DIFFERENT types without being blocked)")
         
         print("🚀 Starting email monitoring thread...")
         monitor_thread = threading.Thread(target=run_email_monitor)
@@ -1062,7 +1088,7 @@ def main():
         port = int(os.environ.get('PORT', 5000))
         print(f"📊 Dashboard will be available at: http://localhost:{port}")
         print("🔄 Email scanning every 20 seconds...")
-        print("🛡️  Customer deduplication active!")
+        print("🛡️  Smart deduplication active (Email + Type combination)!")
         print("Press Ctrl+C to stop the application")
         
         app.run(host='0.0.0.0', port=port, debug=False)
