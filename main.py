@@ -547,6 +547,7 @@ class EmailDataExtractor:
     def _extract_address(self, content: str) -> str:
         """Extract address"""
         patterns = [
+            r'【住所】[\s　]*([^\n\r【】]+)',
             r'【ご住所】[\s　]*([^\n\r【】]+)',  # NEW: Handles 【ご住所】format
             r'▼ご住所▼\s*([^\n\r▼]+)',
             r'ご住所[\s:：]*([^\n\r▼【】]+)',  # UPDATED: Added 【】 to stop chars
