@@ -167,17 +167,17 @@ class DatabaseManager:
     
     def is_customer_recently_processed(self, customer_email: str, submission_type: str, email_subject: str, window_hours: int = DEDUPLICATION_WINDOW_HOURS) -> Dict:
         """
-        Check if customer email was processed recently for the same submission type AND subject
+        Check if customer email was processed recently for the same submission type (email subject)
         Returns duplicate only if BOTH email AND subject match within the window
         """
         if not customer_email or customer_email == "":
             return {'is_duplicate': False, 'previous_submission': None}
         
-        # Normalize submission type and subject for comparison
+        # Normalize submission type for comparison
         if not submission_type or submission_type == "":
             submission_type = "unknown"
         
-        normalized_subject = self._normalize_subject(email_subject)
+        normalized_subject = self._normalize_subject(submission_type)
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -186,7 +186,7 @@ class DatabaseManager:
         threshold = datetime.now() - timedelta(hours=window_hours)
         threshold_str = threshold.strftime('%Y-%m-%d %H:%M:%S')
         
-        # Check for duplicate with SAME customer email AND SAME submission type (subject-based)
+        # Check for duplicate with SAME customer email AND SAME subject
         cursor.execute('''
             SELECT customer_email, submission_type, email_subject, first_submission_at, 
                    last_submission_at, submission_count, first_message_id
@@ -196,7 +196,7 @@ class DatabaseManager:
               AND last_submission_at > ?
             ORDER BY last_submission_at DESC
             LIMIT 1
-        ''', (customer_email, submission_type, threshold_str))
+        ''', (customer_email, normalized_subject, threshold_str))
         
         result = cursor.fetchone()
         conn.close()
@@ -231,6 +231,8 @@ class DatabaseManager:
         if not submission_type or submission_type == "":
             submission_type = "unknown"
         
+        normalized_type = self._normalize_subject(submission_type)
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -239,7 +241,7 @@ class DatabaseManager:
             SELECT id, submission_count, first_message_id 
             FROM customer_submissions 
             WHERE customer_email = ? AND submission_type = ?
-        ''', (customer_email, submission_type))
+        ''', (customer_email, normalized_type))
         
         existing = cursor.fetchone()
         
@@ -252,14 +254,14 @@ class DatabaseManager:
                     last_message_id = ?,
                     email_subject = ?
                 WHERE customer_email = ? AND submission_type = ?
-            ''', (message_id, email_subject, customer_email, submission_type))
+            ''', (message_id, email_subject, customer_email, normalized_type))
         else:
             # Insert new record
             cursor.execute('''
                 INSERT INTO customer_submissions 
                 (customer_email, submission_type, email_subject, first_message_id, last_message_id)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (customer_email, submission_type, email_subject, message_id, message_id))
+            ''', (customer_email, normalized_type, email_subject, message_id, message_id))
         
         conn.commit()
         conn.close()
@@ -927,9 +929,10 @@ class GmailEmailMonitor:
         Process new emails and send to webhook
         
         DEDUPLICATION LOGIC:
-        - Blocks duplicate if: SAME customer email + SAME submission type (subject-based category)
-        - Allows if: SAME customer email + DIFFERENT submission type
-        - Example: customer@example.com can submit "[桧家住宅] イベント参加" and "[桧家住宅] 資料請求" separately
+        - Uses EMAIL SUBJECT as the submission type
+        - Blocks duplicate if: SAME customer email + SAME email subject
+        - Allows if: SAME customer email + DIFFERENT email subject
+        - Example: customer@example.com can send "testing" and "会員登録" separately
         """
         try:
             emails = self.get_latest_emails()
@@ -945,18 +948,17 @@ class GmailEmailMonitor:
                     )
                     
                     customer_email = extracted_data.get('顧客メール', '')
-                    submission_type = extracted_data.get('タイトル', '')
                     email_subject = email['subject']
                     
-                    # If no submission type extracted, use the email subject as fallback
-                    if not submission_type:
-                        submission_type = email_subject
+                    # Use the actual email subject as the submission type for deduplication
+                    # This means each unique subject will be treated as a different submission
+                    submission_type = email_subject if email_subject else extracted_data.get('タイトル', 'unknown')
                     
-                    logger.info(f"📧 Processing email from: {customer_email}")
+                    logger.info(f"Processing email from: {customer_email}")
                     logger.info(f"   Subject: {email_subject}")
-                    logger.info(f"   Type: {submission_type}")
+                    logger.info(f"   Submission Type (for dedup): {submission_type}")
                     
-                    # Check for duplicate: SAME customer email + SAME submission type
+                    # Check for duplicate: SAME customer email + SAME subject
                     dedup_result = self.db.is_customer_recently_processed(
                         customer_email,
                         submission_type,
@@ -965,19 +967,18 @@ class GmailEmailMonitor:
                     )
                     
                     if dedup_result['is_duplicate']:
-                        # This is a duplicate: SAME email + SAME type
+                        # This is a duplicate: SAME email + SAME subject
                         prev = dedup_result['previous_submission']
                         logger.warning(
-                            f"🚫 DUPLICATE BLOCKED\n"
+                            f"DUPLICATE BLOCKED\n"
                             f"   Customer: {customer_email}\n"
-                            f"   Type: {submission_type}\n"
                             f"   Subject: {email_subject}\n"
                             f"   Previous submission: {prev['last_submission_at']}\n"
                             f"   Total count: {prev['submission_count']}"
                         )
                         self.db.add_log(
                             'WARNING', 
-                            f"Duplicate blocked: {customer_email} | {submission_type} | "
+                            f"Duplicate blocked: {customer_email} | {email_subject} | "
                             f"Previous: {prev['last_submission_at']} | Count: {prev['submission_count']}",
                             'deduplication'
                         )
@@ -998,14 +999,13 @@ class GmailEmailMonitor:
                         # Archive the email WITHOUT sending webhook
                         self.archive_email(email['message_id'])
                         
-                        logger.info(f"   → Archived without webhook")
+                        logger.info(f"   -> Archived without webhook")
                         continue
                     
-                    # Not a duplicate - either new customer OR same customer with different type
+                    # Not a duplicate - either new customer OR same customer with different subject
                     logger.info(
-                        f"✅ NEW SUBMISSION ALLOWED\n"
+                        f"NEW SUBMISSION ALLOWED\n"
                         f"   Customer: {customer_email}\n"
-                        f"   Type: {submission_type}\n"
                         f"   Subject: {email_subject}"
                     )
                     
@@ -1027,10 +1027,10 @@ class GmailEmailMonitor:
                         self.db.mark_webhook_sent(email['message_id'])
                         self.archive_email(email['message_id'])
                         
-                        logger.info(f"   → Webhook sent and archived successfully")
+                        logger.info(f"   -> Webhook sent and archived successfully")
                         self.db.add_log(
                             'INFO', 
-                            f'Processed: {email["message_id"]} | {customer_email} | {submission_type}', 
+                            f'Processed: {email["message_id"]} | {customer_email} | {email_subject}', 
                             'processing'
                         )
                     
@@ -1129,42 +1129,43 @@ def run_email_monitor():
 def main():
     """Main function to start the application"""
     try:
-        print("🔧 Setting up database...")
+        print("Setting up database...")
         db = DatabaseManager()
-        print("✅ Database initialized successfully!")
+        print("Database initialized successfully!")
         
-        print("🔑 Testing Gmail API connection...")
+        print("Testing Gmail API connection...")
         monitor = GmailEmailMonitor()
-        print("✅ Gmail API connection successful!")
+        print("Gmail API connection successful!")
         
-        print(f"\n📋 DEDUPLICATION RULES:")
-        print(f"   ⏱️  Window: {DEDUPLICATION_WINDOW_HOURS} hours")
-        print(f"   🚫 Blocks: SAME customer email + SAME submission type")
-        print(f"   ✅ Allows: SAME customer email + DIFFERENT submission type")
+        print(f"\nDEDUPLICATION RULES:")
+        print(f"   Window: {DEDUPLICATION_WINDOW_HOURS} hours")
+        print(f"   Blocks: SAME customer email + SAME email subject")
+        print(f"   Allows: SAME customer email + DIFFERENT email subject")
         print(f"\n   Example scenarios:")
-        print(f"   • customer@example.com submits '[桧家住宅] イベント参加' → SENT")
-        print(f"   • customer@example.com submits '[桧家住宅] イベント参加' again → BLOCKED")
-        print(f"   • customer@example.com submits '[桧家住宅] 資料請求' → SENT (different type)")
+        print(f"   • customer@example.com sends 'testing' -> SENT")
+        print(f"   • customer@example.com sends 'testing' again -> BLOCKED")
+        print(f"   • customer@example.com sends 'new subject' -> SENT (different subject)")
+        print(f"   • customer@example.com sends 'testing' after 24h -> SENT (outside window)")
         
-        print("\n🚀 Starting email monitoring thread...")
+        print("\nStarting email monitoring thread...")
         monitor_thread = threading.Thread(target=run_email_monitor)
         monitor_thread.daemon = True
         monitor_thread.start()
-        print("✅ Email monitoring started!")
+        print("Email monitoring started!")
         
-        print("\n🌐 Starting web dashboard...")
+        print("\nStarting web dashboard...")
         port = int(os.environ.get('PORT', 5000))
-        print(f"📊 Dashboard will be available at: http://localhost:{port}")
-        print("🔄 Email scanning every 20 seconds...")
-        print("🛡️  Smart deduplication active!")
+        print(f"Dashboard will be available at: http://localhost:{port}")
+        print("Email scanning every 20 seconds...")
+        print("Smart deduplication active (Email + Subject combination)!")
         print("\nPress Ctrl+C to stop the application\n")
         
         app.run(host='0.0.0.0', port=port, debug=False)
         
     except KeyboardInterrupt:
-        print("\n⏹️  Application stopped by user")
+        print("\nApplication stopped by user")
     except Exception as e:
-        print(f"❌ Error in main function: {str(e)}")
+        print(f"Error in main function: {str(e)}")
         import traceback
         traceback.print_exc()
 
