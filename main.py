@@ -531,7 +531,7 @@ class EmailDataExtractor:
             r'【郵便番号】[\s　]*([〒]?\d{3}-?\d{4})',
             r'〒(\d{3}-?\d{4})',
         ]
-        
+    
         for pattern in patterns:
             match = re.search(pattern, content)
             if match:
@@ -541,7 +541,7 @@ class EmailDataExtractor:
                 if '-' not in postal and len(postal) == 7:
                     postal = postal[:3] + '-' + postal[3:]
                 return postal
-        
+    
         return ""
     
     def _extract_address(self, content: str) -> str:
