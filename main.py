@@ -486,6 +486,7 @@ class EmailDataExtractor:
         """Extract customer name"""
         patterns = [
             r'▼お名前▼\s*([^\n\r▼]+)',
+            r'【お名前】[\s　]*([^\n\r【】]+)',
             r'お名前[\s:：]*([^\n\r▼]+)',
             r'氏名[\s:：]*([^\n\r▼]+)',
             r'名前[\s:：]*([^\n\r▼]+)',
