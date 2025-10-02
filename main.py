@@ -553,8 +553,12 @@ class EmailDataExtractor:
     def _extract_address(self, content: str) -> str:
         """Extract address"""
 
-        multiline_pattern = r'【ご住所】([\s\S]*?)(?=【|$)'
-        multiline_match = re.search(multiline_pattern, content)
+        multiline_patterns = [
+            r'【ご住所】([\s\S]*?)(?=【|▼|$)',
+            r'▼ご住所▼([\s\S]*?)(?=▼|【|$)',
+            r'▼住所▼([\s\S]*?)(?=▼|【|$)',
+        ]
+        multiline_match = re.search(multiline_patterns, content)
 
         if multiline_match:
             address_block = multiline_match.group(1).strip()

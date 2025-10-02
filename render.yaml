@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: gmail-email-monitor
+    env: docker
+    plan: starter
+    region: oregon
+    buildCommand: docker build -t gmail-monitor .
+    startCommand: python start.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: GMAIL_CLIENT_ID
+        sync: false  # Set this in Render dashboard
+      - key: GMAIL_CLIENT_SECRET
+        sync: false  # Set this in Render dashboard  
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false  # Set this in Render dashboard
+      - key: GMAIL_USER
+        sync: false  # Set this in Render dashboard
+      - key: WEBHOOK_URL
+        sync: false  # Set this in Render dashboard
+    healthCheckPath: /
+    disk:
+      name: gmail-monitor-disk
+      mountPath: /app/data
+      sizeGB: 1
