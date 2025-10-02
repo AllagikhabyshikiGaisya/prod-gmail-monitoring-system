@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # Deduplication configuration (in hours)
 DEDUPLICATION_WINDOW_HOURS = int(os.environ.get('DEDUP_WINDOW_HOURS', '24'))
 
+BLOCKED_SENDER_EMAILS = [
+    'info@mochiie.com',
+    'pac@printpac.co.jp'
+]
+
 class DatabaseManager:
     def __init__(self, db_path='email_monitor.db'):
         self.db_path = db_path
@@ -485,6 +490,7 @@ class EmailDataExtractor:
     def _extract_name(self, content: str) -> str:
         """Extract customer name"""
         patterns = [
+            r'【お名前】[\s　]*([^\n\r【】]+?)(?=【|$)',
             r'▼お名前▼\s*([^\n\r▼]+)',
             r'【お名前】[\s　]*([^\n\r【】]+)',
             r'お名前[\s:：]*([^\n\r▼]+)',
@@ -546,11 +552,28 @@ class EmailDataExtractor:
     
     def _extract_address(self, content: str) -> str:
         """Extract address"""
+
+        multiline_pattern = r'【ご住所】([\s\S]*?)(?=【|$)'
+        multiline_match = re.search(multiline_pattern, content)
+
+        if multiline_match:
+            address_block = multiline_match.group(1).strip()
+            #Remove the postal code symbol and number
+            address_block = re.sub(r'〒\s*\d{3}-?\d{4}\s*', '', address_block)
+            #Clean up extra whitespaces and newlines
+            address_block = re.sub(r'\s+', ' ', address_block)
+            address_block = address_block.strip()
+
+            #If we got a valid address, return it
+            if address_block and address_block != '〒' and len(address_block) > 1:
+                return address_block
+
         patterns = [
-            r'【住所】[\s　]*([^\n\r【】]+)',
-            r'【ご住所】[\s　]*([^\n\r【】]+)',  # NEW: Handles 【ご住所】format
+            r'【住所】[\s　]*([^\n\r【】]+)',           
+            r'【ご住所】[\s　]*([^\n\r【】]+)',  
+            r'【ご住所】[\s　]*\n\s*〒?\s*\n\s*([^\n\r【】]+)',
             r'▼ご住所▼\s*([^\n\r▼]+)',
-            r'ご住所[\s:：]*([^\n\r▼【】]+)',  # UPDATED: Added 【】 to stop chars
+            r'ご住所[\s:：]*([^\n\r▼【】]+)',  
             r'住所[\s:：]*([^\n\r▼【】]+)',
         ]
         
@@ -558,8 +581,13 @@ class EmailDataExtractor:
             match = re.search(pattern, content)
             if match:
                 address = match.group(1).strip()
+                #skip if it's just the 〒 symbol
+                if address == '〒' or address=='':
+                    continue
+                address = re.sub(r'〒', '', address)
                 address = re.sub(r'[】【\[\]()（）▼]', '', address)
                 address = re.sub(r'[\s]+', ' ', address)
+                address = re.sub(r'^\s*\d{3}-?\d{4}\s*', '', address)
                 address = address.strip()
                 return address
         
@@ -568,6 +596,7 @@ class EmailDataExtractor:
     def _extract_phone_number(self, content: str) -> str:
         """Extract phone number"""
         patterns = [
+            r'【お電話番号】[\s　]*([0-9\-]+)',
             r'【電話番号1】\s*([0-9\-]+)',
             r'【電話番号】\s*([0-9\-]+)',
             r'▼電話番号▼\s*([0-9\-]+)',
@@ -589,6 +618,7 @@ class EmailDataExtractor:
     def _extract_trigger(self, content: str) -> str:
         """Extract what triggered the inquiry"""
         patterns = [
+            r'【ご予約のきっかけ】[\s　]*([^\n\r【】]+)',
             r'▼会員登録のきっかけ▼\s*([^\n\r▼]+)',
             r'▼予約のきっかけ▼\s*([^\n\r▼]+)',
             r'予約のきっかけ[\s:：]*([^\n\r▼]+)',
@@ -603,7 +633,8 @@ class EmailDataExtractor:
                 trigger = re.sub(r'[】【\[\]()（）▼]', '', trigger)
                 trigger = re.sub(r'[\s]+', ' ', trigger)
                 trigger = trigger.strip()
-                return trigger
+                if trigger:
+                    return trigger
         
         trigger_map = {
             'HP検索': 'ウェブサイト',
@@ -668,6 +699,8 @@ class EmailDataExtractor:
     def _extract_preferred_time(self, content: str) -> str:
         """Extract preferred time"""
         time_patterns = [
+            r'【ご来店希望時間】[\s　]*([^\n\r【】]+)', 
+            r'ご来店希望時間[\s:：]*([^\n\r]+)',
             r'ご希望時間[\s:：]*([^\n\r]+)',
             r'希望時間[\s:：]*([^\n\r]+)',
             r'時間[\s:：]*([^\n\r]+)',
@@ -694,6 +727,7 @@ class EmailDataExtractor:
     def _extract_furigana(self, content: str) -> str:
         """Extract furigana (phonetic reading)"""
         patterns = [
+            r'【ふりがな】[\s　]*([^\n\r【】]+)',
             r'▼フリガナ▼\s*([^\n\r▼]+)',
             r'フリガナ[\s:：]*([^\n\r▼]+)',
             r'ふりがな[\s:：]*([^\n\r▼]+)',
@@ -707,7 +741,8 @@ class EmailDataExtractor:
                 furigana = re.sub(r'[】【\[\]()（）▼]', '', furigana)
                 furigana = re.sub(r'[\s]+', ' ', furigana)
                 furigana = furigana.strip()
-                return furigana
+                if furigana:
+                    return furigana
         
         return ""
     
@@ -745,6 +780,8 @@ class EmailDataExtractor:
     def _extract_visit_time(self, content: str) -> str:
         """Extract desired visit time in HH:MM format"""
         patterns = [
+            r'【ご来店希望時間】[\s　]*([^\n\r【】]+)',  # MOVED TO TOP LEVEL!
+            r'ご来店希望時間[\s:：]*([^\n\r]+)',
             r'ご希望時間[\s:：]*([^\n\r]+)',
             r'希望時間[\s:：]*([^\n\r]+)',
             r'時間[\s:：]*([^\n\r]+)',
@@ -757,6 +794,8 @@ class EmailDataExtractor:
                 time_text = re.sub(r'[】【\[\]()（）▼]', '', time_text)
                 
                 time_patterns = [
+                    r'【ご来店希望時間】[\s　]*([^\n\r【】]+)', 
+                    r'ご来店希望時間[\s:：]*([^\n\r]+)',   
                     r'(\d{1,2}):(\d{2})(?:～|〜|-|から)?(?:\d{1,2}:\d{2})?',
                     r'(\d{1,2})時(\d{2})分',
                     r'(\d{1,2})[:：時](\d{2})',
@@ -768,7 +807,8 @@ class EmailDataExtractor:
                         hour, minute = time_match.groups()
                         return f"{hour.zfill(2)}:{minute.zfill(2)}"
                 
-                return time_text
+                if time_text:
+                    return time_text
         
         return ""
 
@@ -942,6 +982,25 @@ class GmailEmailMonitor:
             
             for email in emails:
                 try:
+
+                    if email['sender_email'].lower() in [blocked.lower() for blocked in BLOCKED_SENDER_EMAILS]:
+                        logger.warning(
+                            f"BLOCKED SENDER\n"
+                            f" Sender: {email['sender_email']}\n"
+                            f" Subject:{email['subject']}\n"
+                            f" Reason: Email address is in blocked list"
+                        )
+                        self.db.add_log(
+                            'WARNING',
+                            f"Blocked sender: {email['sender_email']} | Subject: {email['subject']}",
+                            'blocked_sender'
+                        )
+
+                        #archive the email without processing
+                        self.archive_email(email['message_id'])
+                        logger.info(f" -> Blocked email archived without processing")
+                        continue
+
                     # Extract structured data
                     extracted_data = self.extractor.extract_data(
                         email['body'],
