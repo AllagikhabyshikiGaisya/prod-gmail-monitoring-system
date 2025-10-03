@@ -552,25 +552,24 @@ class EmailDataExtractor:
     
     def _extract_address(self, content: str) -> str:
         """Extract address"""
-
         multiline_patterns = [
             r'【ご住所】([\s\S]*?)(?=【|▼|$)',
             r'▼ご住所▼([\s\S]*?)(?=▼|【|$)',
             r'▼住所▼([\s\S]*?)(?=▼|【|$)',
         ]
-        multiline_match = re.search(multiline_patterns, content)
-
-        if multiline_match:
-            address_block = multiline_match.group(1).strip()
-            #Remove the postal code symbol and number
-            address_block = re.sub(r'〒\s*\d{3}-?\d{4}\s*', '', address_block)
-            #Clean up extra whitespaces and newlines
-            address_block = re.sub(r'\s+', ' ', address_block)
-            address_block = address_block.strip()
-
-            #If we got a valid address, return it
-            if address_block and address_block != '〒' and len(address_block) > 1:
-                return address_block
+        for pattern in multiline_patterns:
+            multiline_match = re.search(pattern, content)
+            if multiline_match:
+                address_block = multiline_match.group(1).strip()
+                # Remove the postal code symbol and number
+                address_block = re.sub(r'〒\s*\d{3}-?\d{4}\s*', '', address_block)
+                # Clean up extra whitespaces and newlines
+                address_block = re.sub(r'\s+', ' ', address_block)
+                address_block = address_block.strip()
+            
+                # If we got a valid address, return it
+                if address_block and address_block != '〒' and len(address_block) > 1:
+                    return address_block
 
         patterns = [
             r'【住所】[\s　]*([^\n\r【】]+)',           
